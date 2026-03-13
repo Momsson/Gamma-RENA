@@ -1,126 +1,120 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.integrate import quad
-from scipy.optimize import fsolve
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from mpl_toolkits.mplot3d import Axes3D
 
-# =================================================================
-# 1. FYZIKÁLNE DÁTA (Pasko 2023, 2026)
-# =================================================================
-MATERIALS = {
-    "BGO": {
-        "lr_min": 0.011e-2, "Et": 8.65e8, "gamma": 1.0e-3, "Z": 83, "rho": 7.13,
-        "name": "Bismuth Germanate"
-    },
-    "Quartz": {
-        "lr_min": 0.046e-2, "Et": 3.63e8, "gamma": 1.5e-3, "Z": 14, "rho": 2.65,
-        "name": "Silicon Dioxide"
-    },
-    "Air (SL)": {
-        "lr_min": 100.0, "Et": 2.76e5, "gamma": 1.0e-4, "Z": 7.4, "rho": 0.0012,
-        "name": "Atmospheric Air"
-    }
-}
-
-class ResearchEngine:
-    def __init__(self, mat_key="BGO"):
-        self.set_material(mat_key)
-        self.c = 3e8  # Rýchlosť svetla
-
-    def set_material(self, key):
-        self.m = MATERIALS[key]
-        self.key = key
-
-    # --- PILIER A: STABILITA (INCEPTION) ---
-    def get_lambda_r(self, E):
-        """Kineticky korigovaná dĺžka lavíny."""
-        if E <= self.m["Et"]: return 1e10
-        return self.m["lr_min"] / (1 - (self.m["Et"] / E))
-
-    def solve_inception(self, e_ratio_range):
-        """Vypočíta kritickú hrúbku L pre rozsah polí E/Et."""
-        L_crits = []
-        for er in e_ratio_range:
-            lr = self.get_lambda_r(er * self.m["Et"])
-            # Podmienka: L = lr * ln(1/gamma + 1)
-            L_crits.append(lr * np.log(1/self.m["gamma"] + 1))
-        return np.array(L_crits)
-
-    # --- PILIER B: SPEKTRÁLNA ANALÝZA ---
-    def bremsstrahlung_spectrum(self, energies):
-        """Zjednodušený model spektrálnej hustoty (Kramersov zákon)."""
-        E_max = 10.0 # MeV (typické pre RREA)
-        spectrum = np.where(energies < E_max, (E_max - energies) / energies, 0)
-        # Útlm v materiáli (Mass attenuation coefficient aproximácia)
-        mu = 0.05 * (self.m["Z"]**2) / (energies**2.5 + 0.1)
-        attenuation = np.exp(-mu * self.m["rho"] * 0.01) # Pre 1cm vzorku
-        return spectrum * attenuation
-
-    # --- PILIER C: ČASOVÁ DYNAMIKA ---
-    def simulate_pulse(self, L, E_ratio, duration_ns=100):
-        """Simulácia nárastu počtu elektrónov v čase."""
-        E = E_ratio * self.m["Et"]
-        lr = self.get_lambda_r(E)
-        v_drift = 0.9 * self.c # Relativistická rýchlosť
+class GammaRENA_V3:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Gamma-RENA v3.0: 3D Monte Carlo & Optimizer")
+        self.root.geometry("1400x900")
         
-        t = np.linspace(0, duration_ns * 1e-9, 1000)
-        # N(t) = exp(v*t / lr) * termín spätnej väzby
-        # Zjednodušený model exponenciálneho rastu pri uzavretej väzbe
-        growth_rate = v_drift / lr
-        n_t = np.exp(growth_rate * t)
-        return t * 1e9, n_t
+        self.E0 = 7.3e6
+        self.materials = {
+            "Vzduch (STP)": {"Et": 2.84e5, "rho": 1.225, "beta": 1e-4},
+            "PMMA (Plexi)": {"Et": 0.213e9, "rho": 1180, "beta": 1e-4},
+            "BGO Kryštál":  {"Et": 0.865e9, "rho": 7130, "beta": 5e-3},
+        }
 
-# =================================================================
-# 2. VÝSKUMNÝ PANEL (VÝSTUPY)
-# =================================================================
-def run_full_analysis():
-    engine = ResearchEngine("BGO")
-    fig, axs = plt.subplots(2, 2, figsize=(15, 10))
-    fig.patch.set_facecolor('#f4f4f4')
+        self.setup_ui()
 
-    # GRAF 1: MAPA STABILITY (Inception Map)
-    e_ratios = np.linspace(1.1, 2.5, 100)
-    for mat in MATERIALS:
-        engine.set_material(mat)
-        lc = engine.solve_inception(e_ratios)
-        scale = 100 if "Air" not in mat else 1
-        axs[0, 0].plot(e_ratios, lc * scale, label=mat, lw=2)
-    
-    axs[0, 0].set_yscale('log')
-    axs[0, 0].set_title("A: Fázová mapa stability (Inception)", fontweight='bold')
-    axs[0, 0].set_ylabel("Kritická dĺžka L [cm / m]")
-    axs[0, 0].set_xlabel("Prepätie E/Et")
-    axs[0, 0].legend()
-    axs[0, 0].grid(True, alpha=0.3)
+    def setup_ui(self):
+        # Layout
+        left_panel = ttk.Frame(self.root, padding="15")
+        left_panel.pack(side=tk.LEFT, fill=tk.Y)
+        
+        right_panel = ttk.Frame(self.root, padding="10")
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-    # GRAF 2: SPEKTRUM ŽIARENIA
-    engine.set_material("BGO")
-    energies = np.linspace(0.1, 10, 200)
-    spec = engine.bremsstrahlung_spectrum(energies)
-    axs[0, 1].fill_between(energies, spec, color='red', alpha=0.3)
-    axs[0, 1].plot(energies, spec, color='red', lw=2)
-    axs[0, 1].set_title("B: Energetické spektrum fotónov (BGO)", fontweight='bold')
-    axs[0, 1].set_xlabel("Energia [MeV]")
-    axs[0, 1].set_ylabel("Relatívna intenzita (Counts)")
-    axs[0, 1].grid(True, alpha=0.3)
+        # Ovládanie
+        ctrl_frame = ttk.LabelFrame(left_panel, text=" Nastavenia experimentu ", padding="10")
+        ctrl_frame.pack(fill=tk.X)
 
-    # GRAF 3: ČASOVÝ PULZ (OSCILOSKOP)
-    t, n = engine.simulate_pulse(L=0.01, E_ratio=1.3)
-    axs[1, 0].plot(t, n, color='blue', lw=2)
-    axs[1, 0].set_yscale('log')
-    axs[1, 0].set_title("C: Dynamika pulzu (Log scale)", fontweight='bold')
-    axs[1, 0].set_xlabel("Čas [ns]")
-    axs[1, 0].set_ylabel("Počet elektrónov N(t)")
-    axs[1, 0].grid(True, alpha=0.3)
+        ttk.Label(ctrl_frame, text="Materiál:").pack(anchor="w")
+        self.mat_var = tk.StringVar(value="BGO Kryštál")
+        self.mat_combo = ttk.Combobox(ctrl_frame, textvariable=self.mat_var, values=list(self.materials.keys()))
+        self.mat_combo.pack(fill=tk.X, pady=5)
 
-    # GRAF 4: POROVNANIE MATERIÁLOVÝCH PARAMETROV
-    names = list(MATERIALS.keys())
-    ets = [MATERIALS[m]["Et"]/1e6 for m in names]
-    bars = axs[1, 1].bar(names, ets, color=['orange', 'cyan', 'green'])
-    axs[1, 1].set_title("D: Prahové polia Et materiálov", fontweight='bold')
-    axs[1, 1].set_ylabel("Et [MV/cm pre tuhé, kV/m pre vzduch]")
-    
-    plt.tight_layout()
-    plt.show()
+        ttk.Label(ctrl_frame, text="Hrúbka (cm):").pack(anchor="w")
+        self.dist_scale = ttk.Scale(ctrl_frame, from_=0.1, to=50, orient=tk.HORIZONTAL)
+        self.dist_scale.set(10)
+        self.dist_scale.pack(fill=tk.X)
+
+        # --- NOVÉ FUNKCIE ---
+        opt_frame = ttk.LabelFrame(left_panel, text=" Nástroje ", padding="10")
+        opt_frame.pack(fill=tk.X, pady=10)
+
+        ttk.Button(opt_frame, text="🔍 Nájsť optimálnu hrúbku", command=self.optimize_thickness).pack(fill=tk.X, pady=2)
+        ttk.Button(opt_frame, text="⚡ Simulovať 3D trajektórie", command=self.simulate_3d).pack(fill=tk.X, pady=2)
+
+        self.res_text = tk.Text(left_panel, height=15, width=40, font=("Consolas", 9))
+        self.res_text.pack(pady=10)
+
+        # Grafy (2 subplots: 2D Gain a 3D Trajektórie)
+        self.fig = plt.figure(figsize=(8, 10))
+        self.ax2d = self.fig.add_subplot(211)
+        self.ax3d = self.fig.add_subplot(212, projection='3d')
+        
+        self.canvas = FigureCanvasTkAgg(self.fig, master=right_panel)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def get_physics_params(self):
+        mat = self.materials[self.mat_var.get()]
+        dist_m = float(self.dist_scale.get()) / 100
+        return mat['Et'], mat['beta'], dist_m
+
+    def optimize_thickness(self):
+        """Hľadá minimálnu hrúbku d, pri ktorej G >= 1 pri 1.5x Et."""
+        Et, beta, _ = self.get_physics_params()
+        target_field = Et * 1.5
+        lr = (self.E0 / target_field) / (1.0 - Et / target_field)
+        
+        # Rovnica: 1 = beta * exp(d_opt / lr)  => d_opt = ln(1/beta) * lr
+        d_opt_m = np.log(1.0 / beta) * lr
+        d_opt_cm = d_opt_m * 100
+
+        self.dist_scale.set(d_opt_cm)
+        self.res_text.insert(tk.END, f"\n[OPTIMALIZÁCIA]\nCieľ: G=1 pri 1.5*Et\nNavrhovaná hrúbka: {d_opt_cm:.2f} cm\n")
+        self.update_plots_base()
+
+    def simulate_3d(self):
+        """Simuluje náhodný rozptyl častíc v 3D priestore."""
+        Et, beta, dist_m = self.get_physics_params()
+        self.ax3d.clear()
+        
+        # Simulujeme 10 častíc
+        for _ in range(10):
+            steps = 100
+            z = np.linspace(0, dist_m, steps)
+            # Náhodný rozptyl (Brownov pohyb simulujúci kolízie)
+            x = np.cumsum(np.random.normal(0, 0.002, steps))
+            y = np.cumsum(np.random.normal(0, 0.002, steps))
+            
+            self.ax3d.plot(x, y, z, alpha=0.7)
+
+        self.ax3d.set_title("3D Model rozptylu elektrónov")
+        self.ax3d.set_xlabel("X (m)")
+        self.ax3d.set_ylabel("Y (m)")
+        self.ax3d.set_zlabel("Hĺbka (m)")
+        self.canvas.draw()
+
+    def update_plots_base(self):
+        # Základný 2D graf (podobný ako v v2.0)
+        Et, beta, dist_m = self.get_physics_params()
+        fields = np.linspace(Et * 1.05, Et * 3, 200)
+        lr = (self.E0 / fields) / (1.0 - Et / fields)
+        gains = beta * np.exp(dist_m / lr)
+
+        self.ax2d.clear()
+        self.ax2d.semilogy(fields/1e6, gains, label="Gain")
+        self.ax2d.axhline(1, color='red', ls='--')
+        self.ax2d.set_title("Analýza zisku")
+        self.ax2d.set_xlabel("Pole (MV/m)")
+        self.canvas.draw()
 
 if __name__ == "__main__":
-    run_full_analysis()
+    root = tk.Tk()
+    app = GammaRENA_V3(root)
+    root.mainloop()
